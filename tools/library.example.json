@@ -1,0 +1,14 @@
+{
+ "source_dir": "~/Desktop/Lute/books",
+ "books": [
+  {
+   "id": "my-book",
+   "file": "My Book.pdf",
+   "title": "My Book",
+   "author": "Author Name",
+   "skip": [
+    "^introduction$"
+   ]
+  }
+ ]
+}

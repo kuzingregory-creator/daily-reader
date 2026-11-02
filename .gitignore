@@ -1,0 +1,15 @@
+# Personal books never go to the public repo
+books/
+*.pdf
+*.epub
+
+node_modules/
+dist/
+__pycache__/
+.DS_Store
+
+# Local book list (file names of personal copies)
+tools/library.json
+
+# The spec stays on the Mac
+SPEC.md

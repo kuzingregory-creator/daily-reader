@@ -1,0 +1,28 @@
+{
+  "name": "daily-reader",
+  "private": true,
+  "version": "0.5.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "test": "vitest run",
+    "wordlist": "node scripts/build-wordlist.mjs"
+  },
+  "dependencies": {
+    "idb": "^8.0.4",
+    "preact": "^10.29.8",
+    "ts-fsrs": "^5.4.2"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "subtlex-word-frequencies": "^2.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.1.0",
+    "wink-lemmatizer": "^3.0.4",
+    "workbox-window": "^7.4.1"
+  }
+}
