@@ -32,6 +32,7 @@ export function SettingsScreen() {
         </p>
       </section>
       <p class="muted pad small">{t('storage_note')} · v{__APP_VERSION__}</p>
+      <p class="muted pad small">{t('credits')}</p>
       <TabBar active="settings" />
     </div>
   );

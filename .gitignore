@@ -13,3 +13,6 @@ tools/library.json
 
 # The spec stays on the Mac
 SPEC.md
+
+# Downloaded word data (rebuilt by npm run phrases)
+scripts/data/

@@ -1,4 +1,3 @@
-/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from 'vite';
 import preact from '@preact/preset-vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -58,5 +57,4 @@ export default defineConfig({
     }),
   ],
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-  test: { include: ['src/**/*.test.ts'] },
 });

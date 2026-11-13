@@ -61,7 +61,7 @@ const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length;
  * Picks 1–2 short, useful definitions: the part of speech from context first,
  * skipping stubs like "To run." or "Plural of leaf." Exported for tests.
  */
-export function pickSenses(entries: FdEntry[], pos: PosHint, lemma: string): Explanation | null {
+export function pickSenses(entries: FdEntry[], pos: PosHint, lemma: string, source = 'Free Dictionary'): Explanation | null {
   const meanings = entries.flatMap((e) => e.meanings);
   if (!meanings.length) return null;
   const byPos = new Map<string, { definition: string; example?: string }[]>();
@@ -71,7 +71,7 @@ export function pickSenses(entries: FdEntry[], pos: PosHint, lemma: string): Exp
       const definition = cleanDefinition(d.definition);
       const n = wordCount(definition);
       if (n < 3 || n > 30 || definition.endsWith(':') || USELESS.test(definition)) continue;
-      if (n === 3 && new RegExp(`\\b${lemma}\\b`, 'i').test(definition)) continue; // "To run."
+      if (n === 3 && definition.toLowerCase().includes(lemma.toLowerCase())) continue; // "To run."
       list.push({ definition, example: d.example });
     }
     if (list.length) byPos.set(m.partOfSpeech, list);
@@ -93,7 +93,7 @@ export function pickSenses(entries: FdEntry[], pos: PosHint, lemma: string): Exp
     phonetic: entry.phonetic ?? entry.phonetics?.find((p) => p.text)?.text,
     senses: chosen.map((d) => ({ pos: preferred, definition: d.definition })),
     example,
-    source: 'Free Dictionary',
+    source,
   };
 }
 
@@ -110,6 +110,93 @@ export function freeDictionary(fetchJson: Fetcher): ExplanationProvider {
         result = entries && pickSenses(entries, pos, form.toLowerCase());
       }
       return result ?? null;
+    },
+  };
+}
+
+// ------------------------------------------------------------------ Simple English Wiktionary
+
+/** Wiki markup → plain text: [[link|text]] → text, '''bold''' → bold, templates and tags dropped. */
+export function stripWiki(s: string): string {
+  let out = s.replace(/<ref[^>]*\/>|<ref[^>]*>[\s\S]*?<\/ref>/g, '');
+  for (let i = 0; i < 4 && out.includes('{{'); i++) out = out.replace(/\{\{[^{}]*\}\}/g, '');
+  return out
+    .replace(/\[\[(?:[^\]|]*\|)?([^\]]*)\]\]/g, '$1')
+    .replace(/'{2,}/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const POS_NAMES: Record<string, string> = { 'phrasal verb': 'verb', idiom: 'phrase', 'proper noun': 'noun' };
+
+/** Simple English Wiktionary page → the same shape as a Free Dictionary answer. */
+export function parseSimpleWiktionary(word: string, wikitext: string): FdEntry[] {
+  const meanings: FdEntry['meanings'] = [];
+  let phonetic: string | undefined;
+  let current: FdEntry['meanings'][number] | undefined;
+  for (const raw of wikitext.split('\n')) {
+    const line = raw.trim();
+    const heading = /^=+\s*([A-Za-z ]+?)\s*=+$/.exec(line);
+    if (heading) {
+      const name = heading[1].toLowerCase();
+      current = { partOfSpeech: POS_NAMES[name] ?? name, definitions: [] };
+      meanings.push(current);
+      continue;
+    }
+    if (!phonetic && /IPA/.test(line)) phonetic = /\/[^/{}|]+\//.exec(line)?.[0];
+    if (!current) continue;
+    const example = /^#[:*]\s*(.+)/.exec(line);
+    if (example) {
+      const last = current.definitions[current.definitions.length - 1];
+      if (last && !last.example) last.example = stripWiki(example[1]);
+      continue;
+    }
+    const def = /^#\s*(.+)/.exec(line);
+    if (def) {
+      const definition = stripWiki(def[1]);
+      if (definition) current.definitions.push({ definition });
+    }
+  }
+  return [{ word, phonetic, meanings: meanings.filter((m) => m.definitions.length) }];
+}
+
+/**
+ * Simple English Wiktionary: definitions written in easy English for learners.
+ * Smaller than the full dictionary, so it goes first and Free Dictionary fills the gaps.
+ */
+export function simpleWiktionary(fetchJson: Fetcher): ExplanationProvider {
+  const lookup = async (word: string) => {
+    const r = (await fetchJson(
+      `https://simple.wiktionary.org/w/api.php?action=parse&prop=wikitext&format=json&formatversion=2&redirects=1&origin=*&page=${encodeURIComponent(word)}`,
+    )) as { parse?: { title: string; wikitext: string } } | null;
+    return r?.parse ? parseSimpleWiktionary(r.parse.title, r.parse.wikitext) : null;
+  };
+  return {
+    id: 'simplewiki',
+    async explain({ lemma, pos }) {
+      const entries = await lookup(lemma);
+      return (entries && pickSenses(entries, pos, lemma, 'Simple English Wiktionary')) ?? null;
+    },
+  };
+}
+
+/** Asks each provider in turn; the first explanation wins. */
+export function firstOf(...providers: ExplanationProvider[]): ExplanationProvider {
+  return {
+    id: providers.map((p) => p.id).join('+'),
+    async explain(q) {
+      let failure: unknown;
+      for (const p of providers) {
+        try {
+          const result = await p.explain(q);
+          if (result) return result;
+        } catch (e) {
+          failure = e;
+        }
+      }
+      if (failure) throw failure;
+      return null;
     },
   };
 }

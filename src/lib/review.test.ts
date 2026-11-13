@@ -16,6 +16,10 @@ describe('cloze', () => {
     expect(cloze('The soundtrack was loud.', 'sound')).toBeNull();
   });
 
+  it('blanks each word of an expression', () => {
+    expect(cloze('I’m turning over a new leaf.', 'turning over a new leaf')!.blank).toBe('t______ o___ a n__ l___');
+  });
+
   it('handles phrases and curly apostrophes', () => {
     expect(cloze('He gave   up at last.', 'gave up')!.after).toBe(' at last.');
     expect(cloze('I don’t know.', "don't")!.answer).toBe('don’t');

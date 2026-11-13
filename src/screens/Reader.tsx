@@ -3,7 +3,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { useApp } from '../i18n';
 import { isHeadingLike, SCENE_BREAK } from '../lib/excerpt';
 import { contextPos, lemmaOf, lemmaReadings, lemmasReady, loadLemmas, phraseKey } from '../lib/lemma';
-import { selectionHit, sentenceAt, wordAt, wordBefore, type TextHit } from '../lib/textpos';
+import { findAll, loadPhrases, patternFor, phraseAt, type Pattern } from '../lib/phrases';
+import { selectionHit, sentenceAt, sentenceRange, wordAt, wordBefore, type TextHit } from '../lib/textpos';
 import { WORD_RE } from '../lib/words';
 import { chapterAt, getPosition, loadBook, savePosition, type LoadedBook } from '../store/books';
 import { finishToday, getToday } from '../store/today';
@@ -11,30 +12,57 @@ import { fillMissingExplanations, learningKeys, loadWords, onWordsChange } from 
 import { Icon, Sheet, TypeControls, go } from '../components/ui';
 import { WordPopover, type WordTarget } from '../components/WordPopover';
 
-/** Paragraph text with words being learned wrapped for a dotted underline. */
-function markLearning(text: string, learning: Set<string>): ComponentChildren {
+/** Paragraph text with the words and expressions being learned wrapped for a dotted underline. */
+function markLearning(text: string, learning: Set<string>, phrases: Pattern[]): ComponentChildren {
   if (!learning.size) return text;
+  const ranges: [number, number][] = [];
+  for (const m of text.matchAll(WORD_RE)) {
+    if (lemmaReadings(m[0]).some((l) => learning.has(l))) ranges.push([m.index!, m.index! + m[0].length]);
+  }
+  for (const m of findAll(text, phrases)) ranges.push(...m.parts);
+  if (!ranges.length) return text;
+  ranges.sort((a, b) => a[0] - b[0]);
   const out: ComponentChildren[] = [];
   let last = 0;
-  for (const m of text.matchAll(WORD_RE)) {
-    if (!lemmaReadings(m[0]).some((l) => learning.has(l))) continue;
-    out.push(text.slice(last, m.index), <span class="lw">{m[0]}</span>);
-    last = m.index! + m[0].length;
+  for (const [a, b] of ranges) {
+    if (a < last) continue;
+    out.push(text.slice(last, a), <span class="lw">{text.slice(a, b)}</span>);
+    last = b;
   }
-  if (!out.length) return text;
   out.push(text.slice(last));
   return out;
+}
+
+/** A DOM range for characters [start, end) of a paragraph element (its text may be split by underline spans). */
+function domRange(el: Element, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let pos = 0;
+  let started = false;
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    const len = n.data.length;
+    if (!started && start <= pos + len) {
+      range.setStart(n, start - pos);
+      started = true;
+    }
+    if (started && end <= pos + len) {
+      range.setEnd(n, end - pos);
+      return range;
+    }
+    pos += len;
+  }
+  return null;
 }
 
 type HighlightRegistry = { set(name: string, h: unknown): void; delete(name: string): void };
 const highlights = (): HighlightRegistry | undefined => (globalThis.CSS as unknown as { highlights?: HighlightRegistry })?.highlights;
 
-/** Tint the word the popover is about (CSS Custom Highlight API; no DOM changes). */
-function markActive(range: Range | null) {
+/** Tint the words the popover is about (CSS Custom Highlight API; no DOM changes). */
+function markActive(ranges: Range[] | null) {
   const reg = highlights();
-  const H = (globalThis as unknown as { Highlight?: new (r: Range) => unknown }).Highlight;
+  const H = (globalThis as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
   if (!reg || !H) return;
-  if (range) reg.set('active-word', new H(range));
+  if (ranges?.length) reg.set('active-word', new H(...ranges));
   else reg.delete('active-word');
 }
 
@@ -132,6 +160,7 @@ function ReaderView({ book, mode, start, end, at }: Session) {
   const [target, setTarget] = useState<WordTarget | null>(null);
   const targetY = useRef<number | null>(null);
   const [learning, setLearning] = useState<Set<string>>(new Set());
+  const [learningPhrases, setLearningPhrases] = useState<Pattern[]>([]);
 
   useLayoutEffect(() => {
     if (scrollTo.current === null) window.scrollTo(0, 0);
@@ -139,8 +168,13 @@ function ReaderView({ book, mode, start, end, at }: Session) {
 
   // Saved words and base forms load in the background; underlines appear when ready.
   useEffect(() => {
-    const refresh = () => setLearning(learningKeys());
+    const refresh = () => {
+      const keys = learningKeys();
+      setLearning(keys);
+      setLearningPhrases([...keys].filter((k) => k.includes(' ')).map(patternFor));
+    };
     Promise.all([loadWords(), loadLemmas()]).then(refresh);
+    loadPhrases().then(refresh);
     fillMissingExplanations().catch(() => {});
     const off = onWordsChange(refresh);
     addEventListener('online', fillMissingExplanationsQuietly);
@@ -152,21 +186,47 @@ function ReaderView({ book, mode, start, end, at }: Session) {
 
   const open = (hit: TextHit, kind: 'word' | 'phrase') => {
     const text = book.paragraphs[hit.para];
-    const before = wordBefore(text, hit.offset);
-    const pos = kind === 'word' ? contextPos(hit.text, before) : undefined;
-    setTarget({
-      kind,
-      text: hit.text,
-      key: kind === 'word' ? lemmaOf(hit.text, pos) : phraseKey(hit.text),
-      pos,
+    const paraEl = root.current?.querySelector(`[data-i="${hit.para}"]`);
+    const base = {
       sentence: sentenceAt(text, hit.offset),
       bookId: book.meta.id,
       bookTitle: book.meta.title,
       para: hit.para,
-      rect: hit.range.getBoundingClientRect(),
-    });
+    };
+    let target: WordTarget;
+    if (kind === 'word') {
+      const pos = contextPos(hit.text, wordBefore(text, hit.offset));
+      const word: WordTarget = {
+        ...base, kind, text: hit.text, key: lemmaOf(hit.text, pos), pos,
+        rect: hit.range.getBoundingClientRect(), ranges: [hit.range],
+      };
+      // Part of a fixed expression here? Then the expression comes first; the word is one tap away.
+      const m = phraseAt(text, hit.offset, sentenceRange(text, hit.offset));
+      const parts = m && paraEl ? m.parts.map(([a, b]) => domRange(paraEl, a, b)).filter((r): r is Range => !!r) : [];
+      const whole = m && paraEl ? domRange(paraEl, m.start, m.end) : null;
+      if (m && whole && parts.length) {
+        target = {
+          ...base, kind: 'phrase', text: text.slice(m.start, m.end), key: m.phrase,
+          rect: whole.getBoundingClientRect(), ranges: parts, alt: word,
+        };
+      } else target = word;
+    } else {
+      target = {
+        ...base, kind, text: hit.text, key: phraseKey(hit.text),
+        rect: hit.range.getBoundingClientRect(), ranges: [hit.range],
+      };
+    }
+    setTarget(target);
     targetY.current = scrollY;
-    markActive(hit.range);
+    markActive(target.ranges);
+  };
+
+  /** Expression ↔ the single word. */
+  const switchTarget = () => {
+    if (!target?.alt) return;
+    const next = { ...target.alt, alt: { ...target, alt: undefined } };
+    setTarget(next);
+    markActive(next.ranges);
   };
 
   const close = () => {
@@ -301,6 +361,7 @@ function ReaderView({ book, mode, start, end, at }: Session) {
   const items = useMemo(() => {
     const chapterTitles = new Map(book.meta.chapters.map((c) => [c.start, c.title]));
     const marks = lemmasReady() ? learning : new Set<string>();
+    const phraseMarks = lemmasReady() ? learningPhrases : [];
     const out = [];
     for (let i = win[0]; i < win[1]; i++) {
       const title = chapterTitles.get(i);
@@ -310,11 +371,11 @@ function ReaderView({ book, mode, start, end, at }: Session) {
         out.push(<p key={i} data-i={i} class="scene" aria-label="Scene break">⁂</p>);
       } else {
         const sub = isHeadingLike(p) && /[A-Z]/.test(p) && p === p.toUpperCase();
-        out.push(<p key={i} data-i={i} class={sub ? 'subhead' : undefined}>{markLearning(p, marks)}</p>);
+        out.push(<p key={i} data-i={i} class={sub ? 'subhead' : undefined}>{markLearning(p, marks, phraseMarks)}</p>);
       }
     }
     return out;
-  }, [win, learning]);
+  }, [win, learning, learningPhrases]);
 
   return (
     <div class="reader">
@@ -338,7 +399,7 @@ function ReaderView({ book, mode, start, end, at }: Session) {
         </button>
       </header>
 
-      {target && <WordPopover key={`${target.key}-${target.para}`} target={target} onClose={close} />}
+      {target && <WordPopover key={`${target.key}-${target.para}`} target={target} onClose={close} onSwitch={switchTarget} />}
 
       <article class="page" lang="en" ref={root} onClick={onTap}>
         {mode === 'free' && win[0] > 0 && (

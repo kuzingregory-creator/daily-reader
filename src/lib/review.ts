@@ -31,7 +31,7 @@ export function buildSession(cards: CardRecord[], newSeenToday: number, dayEnd: 
 export interface Cloze {
   before: string;
   after: string;
-  /** "r______": first letter, then one underscore per remaining letter (at most 8). */
+  /** "r______": first letter, then one underscore per remaining letter (at most 8); per word for expressions. */
   blank: string;
   answer: string;
 }
@@ -47,13 +47,12 @@ export function cloze(sentence: string, ...forms: (string | undefined)[]): Cloze
     if (!m) continue;
     const start = m.index + m[1].length;
     const answer = m[2];
-    const letters = answer.replace(/[^A-Za-z]/g, '');
-    return {
-      before: sentence.slice(0, start),
-      after: sentence.slice(start + answer.length),
-      blank: answer[0] + '_'.repeat(Math.min(8, Math.max(2, letters.length - 1))),
-      answer,
-    };
+    // One blank per word, each with its first letter: "t______ o___ a n__ l___".
+    const blank = answer
+      .split(/\s+/)
+      .map((w) => w[0] + '_'.repeat(Math.min(8, Math.max(w.length > 1 ? 2 : 0, w.replace(/[^A-Za-z]/g, '').length - 1))))
+      .join(' ');
+    return { before: sentence.slice(0, start), after: sentence.slice(start + answer.length), blank, answer };
   }
   return null;
 }

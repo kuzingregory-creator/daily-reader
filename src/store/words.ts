@@ -1,6 +1,8 @@
 import { db } from '../db';
 import {
+  firstOf,
   freeDictionary,
+  simpleWiktionary,
   myMemory,
   NetworkError,
   type ExplainQuery,
@@ -55,7 +57,8 @@ async function cachedFetch(url: string): Promise<unknown> {
   }
 }
 
-export const explanationProvider: ExplanationProvider = freeDictionary(cachedFetch);
+/** Simple English Wiktionary first (easy definitions), Free Dictionary for everything it lacks. */
+export const explanationProvider: ExplanationProvider = firstOf(simpleWiktionary(cachedFetch), freeDictionary(cachedFetch));
 export const translationProvider: TranslationProvider = myMemory(cachedFetch);
 
 export const explain = (q: ExplainQuery): Promise<Explanation | null> => explanationProvider.explain(q);

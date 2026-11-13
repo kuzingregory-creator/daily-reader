@@ -17,6 +17,10 @@ export interface WordTarget {
   bookTitle: string;
   para: number;
   rect: DOMRect;
+  /** What to tint in the text: the word, or every word of the expression. */
+  ranges: Range[];
+  /** The other reading: the single word for an expression, and back. */
+  alt?: WordTarget;
 }
 
 type Lookup = { state: 'loading' } | { state: 'ok'; data: Explanation } | { state: 'none' } | { state: 'offline' };
@@ -33,7 +37,7 @@ export function speak(text: string) {
   speechSynthesis.speak(u);
 }
 
-export function WordPopover({ target, onClose }: { target: WordTarget; onClose: () => void }) {
+export function WordPopover({ target, onClose, onSwitch }: { target: WordTarget; onClose: () => void; onSwitch: () => void }) {
   const { t } = useApp();
   const saved = getWord(target.key);
   const [lookup, setLookup] = useState<Lookup>(() =>
@@ -101,7 +105,7 @@ export function WordPopover({ target, onClose }: { target: WordTarget; onClose: 
   };
 
   const lower = target.text.toLowerCase().replace(/’/g, "'");
-  const showBase = target.kind === 'word' && target.key !== lower;
+  const showBase = target.key !== lower;
   const data = lookup.state === 'ok' ? lookup.data : undefined;
 
   return (
@@ -115,6 +119,11 @@ export function WordPopover({ target, onClose }: { target: WordTarget; onClose: 
           🔊
         </button>
       </div>
+      {target.alt && (
+        <button class="switch" onClick={onSwitch}>
+          {target.kind === 'phrase' ? t('only_word', { w: target.alt.text }) : t('whole_phrase', { p: target.alt.key })}
+        </button>
+      )}
       {(data?.phonetic || data?.senses[0]) && (
         <div class="pop-meta">
           {data.phonetic && <span>{data.phonetic}</span>}

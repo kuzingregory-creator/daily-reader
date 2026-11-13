@@ -71,8 +71,8 @@ export function selectionHit(root: Element): TextHit | null {
 
 const ABBREVIATIONS = /\b(Mr|Mrs|Ms|Dr|St|Jr|Sr|Prof|vs|etc|i\.e|e\.g|a\.m|p\.m)\.$/i;
 
-/** The sentence around a character offset of a paragraph. */
-export function sentenceAt(text: string, offset: number): string {
+/** Start and end of the sentence around a character offset of a paragraph. */
+export function sentenceRange(text: string, offset: number): [number, number] {
   const isEnd = (i: number) => {
     if (!/[.!?…]/.test(text[i])) return false;
     let j = i + 1;
@@ -85,6 +85,12 @@ export function sentenceAt(text: string, offset: number): string {
   let end = offset;
   while (end < text.length && !isEnd(end)) end++;
   while (end < text.length && /[.!?…”"’')\]]/.test(text[end])) end++;
+  return [start, end];
+}
+
+/** The sentence around a character offset of a paragraph. */
+export function sentenceAt(text: string, offset: number): string {
+  const [start, end] = sentenceRange(text, offset);
   let s = text.slice(start, end).trim();
   if (s.length > 320) {
     const from = Math.max(0, offset - start - 150);
