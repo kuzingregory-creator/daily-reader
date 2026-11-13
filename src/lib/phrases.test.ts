@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parseSimpleWiktionary, pickSenses, stripWiki } from './explain';
-import { compile, findAll, loadPhrases, phraseAt } from './phrases';
+import { addPersonalPhrases, compile, findAll, loadPhrases, phraseAt } from './phrases';
 import { sentenceRange } from './textpos';
 
 beforeAll(() => loadPhrases());
@@ -36,6 +36,18 @@ describe('fixed expressions', () => {
 
   it('does not reach into the next sentence', () => {
     expect(tap('He gave. Up the hill they went.', 'gave')?.phrase).not.toBe('give up');
+  });
+
+  it('adds the reader’s own collocations and prefers them', async () => {
+    expect(tap('There was heavy rain all night.', 'rain')).toBeNull();
+    await addPersonalPhrases(['heavy rain', 'make a decision']);
+    expect(tap('There was heavy rain all night.', 'rain')?.phrase).toBe('heavy rain');
+    expect(tap('She made a quick decision.', 'decision')).toBeNull();
+    expect(tap('She made a decision at last.', 'decision')?.phrase).toBe('make a decision');
+    await addPersonalPhrases(['have a break', 'wind dies down']);
+    expect(tap('We had a break at noon.', 'break')?.phrase).toBe('have a break');
+    expect(tap('It had a broken leg.', 'broken')).toBeNull();
+    expect(tap('By evening the wind died down.', 'wind')?.phrase).toBe('wind dies down');
   });
 
   it('underlines a learned expression wherever it appears', () => {

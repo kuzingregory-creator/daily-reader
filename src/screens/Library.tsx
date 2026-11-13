@@ -3,6 +3,7 @@ import { useApp } from '../i18n';
 import { HARD } from '../lib/plan';
 import { deleteBook, getPositions, importBook, listBooks, loadBook, parseBookFile, savePosition } from '../store/books';
 import { getQueue, getToday, setPinned } from '../store/today';
+import { importPhraseList, isPhraseList, phraseLists, removePhraseList, type PhraseList } from '../store/phrases';
 import type { BookMeta, Position } from '../types';
 import { Icon, ProgressBar, Sheet, TabBar, go } from '../components/ui';
 
@@ -18,6 +19,7 @@ export function LibraryScreen() {
   const [todayId, setTodayId] = useState<string>();
   const [menu, setMenu] = useState<Row | null>(null);
   const [message, setMessage] = useState<string>('');
+  const [lists, setLists] = useState<PhraseList[]>([]);
   const input = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -27,6 +29,7 @@ export function LibraryScreen() {
     setRows(metas.map((meta) => ({ meta, pos: pos.get(meta.id) })));
     setPinnedId(queue.pinned);
     setTodayId(today.record.plan?.bookId);
+    setLists(await phraseLists());
   };
   useEffect(() => {
     load();
@@ -37,7 +40,13 @@ export function LibraryScreen() {
     const errors: string[] = [];
     for (const item of items) {
       try {
-        const { meta } = await importBook(parseBookFile(JSON.parse(await item.read())));
+        const data = JSON.parse(await item.read());
+        if (isPhraseList(data)) {
+          // A personal list of expressions (collocations), not a book.
+          added.push(t('phrases_added', { title: data.title, n: await importPhraseList(data) }));
+          continue;
+        }
+        const { meta } = await importBook(parseBookFile(data));
         added.push(meta.title);
       } catch (e) {
         errors.push(t('import_error', { name: item.name, error: e instanceof Error ? e.message : String(e) }));
@@ -101,6 +110,30 @@ export function LibraryScreen() {
           );
         })}
       </ul>
+
+      {!!lists.length && (
+        <section class="phrase-lists">
+          <h2 class="chart-title">{t('my_expressions')}</h2>
+          {lists.map((l) => (
+            <div key={l.title} class="phrase-list">
+              <div>
+                <div class="title">{l.title}</div>
+                <div class="muted small">{t('expressions_n', { n: l.phrases.length })}</div>
+              </div>
+              <button
+                class="plain-btn"
+                onClick={async () => {
+                  if (!confirm(t('remove_list_confirm', { title: l.title }))) return;
+                  await removePhraseList(l.title);
+                  load();
+                }}
+              >
+                {t('delete')}
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
 
       {menu && (
         <Sheet title={menu.meta.title} onClose={() => setMenu(null)}>

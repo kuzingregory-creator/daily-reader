@@ -7,7 +7,7 @@ import { WORD_RE } from './words';
  */
 
 type Slot =
-  | { kind: 'word'; lemmas: Set<string> }
+  | { kind: 'word'; lemmas: Set<string>; surface?: boolean } // surface: compare the word as written
   | { kind: 'poss' } // one's, someone's → my, her, John's…
   | { kind: 'refl' } // oneself → myself, themselves…
   | { kind: 'np' } // someone, something → 1–4 words
@@ -21,6 +21,8 @@ export interface Pattern {
   verb: boolean;
   /** Shown on tap (see worthShowing); saved expressions are underlined either way. */
   useful: boolean;
+  /** From the reader's own list (e.g. a collocations book): wins over Wiktionary. */
+  mine?: boolean;
 }
 
 export interface PhraseMatch {
@@ -46,6 +48,7 @@ const POSSESSIVES = new Set(['my', 'your', 'his', 'her', 'its', 'our', 'their', 
 const REFLEXIVES = new Set(['myself', 'yourself', 'himself', 'herself', 'itself', 'ourselves', 'yourselves', 'themselves', 'oneself']);
 const PARTICLES = new Set(['up', 'down', 'off', 'on', 'out', 'in', 'away', 'back', 'over', 'through', 'about', 'around', 'round', 'along', 'by', 'apart', 'aside', 'together', 'forward', 'across']);
 
+const NOUN_BEFORE = new Set(['a', 'an', 'the', "one's", 'my', 'your', 'his', 'her', 'their', 'our']);
 const SEPARABLE = new Set(['up', 'down', 'off', 'out', 'away', 'back', 'over', 'around', 'round', 'apart', 'aside', 'together', 'forward']);
 
 const norm = (w: string) => w.toLowerCase().replace(/’/g, "'");
@@ -75,15 +78,18 @@ function worthShowing(fixed: string[]): boolean {
 }
 
 /** "make up one's mind" → word(make) word(up) poss word(mind). Verb phrases may split around a particle. */
-export function compile(text: string, isVerb = false): Pattern {
+export function compile(text: string, isVerb = false, anyForm = false): Pattern {
   const words = norm(text).split(/\s+/).filter(Boolean);
-  const slots: Slot[] = words.map((w) => {
+  const slots: Slot[] = words.map((w, i) => {
     if (w === "one's" || w === "someone's" || w === "somebody's") return { kind: 'poss' };
     if (w === 'oneself') return { kind: 'refl' };
     if (w === 'someone' || w === 'somebody' || w === 'something' || w === 'sb' || w === 'sth') return { kind: 'np' };
-    // A base form matches all its forms (make → made); a fixed form only itself ("have someone going").
+    // A base form matches all its forms (make → made); a fixed form only itself ("have someone going"),
+    // unless any form will do (textbook lists: "wind dies down" also matches "the wind died down").
     const readings = lemmaReadings(w);
-    return { kind: 'word', lemmas: new Set(readings[0] === w ? [w, ...readings] : [w]) };
+    // After "a"/"the"/"one's" it is a noun: plural only ("a break" must not match "broken").
+    if (i > 0 && NOUN_BEFORE.has(words[i - 1])) return { kind: 'word', lemmas: new Set([w, `${w}s`, `${w}es`]), surface: true };
+    return { kind: 'word', lemmas: new Set(anyForm || readings[0] === w ? [w, ...readings] : [w]) };
   });
   // "for someone", "something to": an open slot at the edge would match anything — leave it out.
   while (slots.length && slots[0].kind === 'np') slots.shift();
@@ -137,7 +143,9 @@ function matchAt(p: Pattern, tokens: Token[], i: number): Hit | null {
         ? POSSESSIVES.has(w) || /'s$/.test(w)
         : slot.kind === 'refl'
           ? REFLEXIVES.has(w)
-          : tok.lemmas.some((l) => slot.lemmas.has(l));
+          : slot.surface
+            ? slot.lemmas.has(w)
+            : tok.lemmas.some((l) => slot.lemmas.has(l));
     if (!ok) return false;
     used.push(t);
     if (slot.kind === 'word') fixed.push(t);
@@ -159,6 +167,17 @@ function toMatch(p: Pattern, tokens: Token[], used: number[]): PhraseMatch {
 let index: Map<string, Pattern[]> | undefined;
 let loading: Promise<void> | undefined;
 
+function addToIndex(p: Pattern) {
+  for (const slot of p.slots) {
+    if (slot.kind !== 'word') continue;
+    for (const l of slot.lemmas) {
+      const list = index!.get(l) ?? [];
+      if (!list.includes(p)) list.push(p);
+      index!.set(l, list);
+    }
+  }
+}
+
 /** Loads the expression list (~100 KB) and indexes it by the base form of each fixed word. */
 export function loadPhrases(): Promise<void> {
   // Patterns compare base forms, so the base-form table must be there first.
@@ -167,20 +186,27 @@ export function loadPhrases(): Promise<void> {
     index = new Map();
     const add = (text: string, isVerb: boolean) => {
       const p = compile(text, isVerb);
-      if (!p.useful) return;
-      for (const slot of p.slots) {
-        if (slot.kind !== 'word') continue;
-        for (const l of slot.lemmas) {
-          const list = index!.get(l) ?? [];
-          if (!list.includes(p)) list.push(p);
-          index!.set(l, list);
-        }
-      }
+      if (p.useful) addToIndex(p);
     };
     data.verb.forEach((t) => add(t, true));
     data.other.forEach((t) => add(t, false));
   });
   return loading;
+}
+
+/** The reader's own expressions (a collocations book): always shown, and preferred on a tie. */
+export async function addPersonalPhrases(phrases: string[]): Promise<void> {
+  await loadPhrases();
+  for (const [key, list] of index!) {
+    const kept = list.filter((p) => !p.mine);
+    if (kept.length) index!.set(key, kept);
+    else index!.delete(key);
+  }
+  for (const text of phrases) {
+    const words = norm(text).split(/\s+/);
+    const p = compile(text, words.length === 2 && SEPARABLE.has(words[1]), true);
+    if (p.slots.some((s) => s.kind === 'word')) addToIndex({ ...p, useful: true, mine: true });
+  }
 }
 
 export const phrasesReady = () => !!index;
@@ -201,8 +227,9 @@ export function phraseAt(paragraph: string, offset: number, range: [number, numb
       const hit = matchAt(p, tokens, i);
       if (!hit || !hit.fixed.includes(at)) continue;
       if (p.verb && i > 0 && posHint(tokens[i].text, tokens[i - 1].text) === 'noun') continue;
-      const better = !best || hit.fixed.length > best.hit.fixed.length ||
-        (hit.fixed.length === best.hit.fixed.length && p.text.length > best.p.text.length);
+      const rank = (q: Pattern, h: Hit) => [q.mine && h.fixed.length >= 2 ? 1 : 0, h.fixed.length, q.text.length];
+      const [a, b] = [rank(p, hit), best ? rank(best.p, best.hit) : null];
+      const better = !b || a[0] > b[0] || (a[0] === b[0] && (a[1] > b[1] || (a[1] === b[1] && a[2] > b[2])));
       if (better) best = { p, hit };
       break;
     }

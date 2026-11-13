@@ -8,6 +8,7 @@ import { selectionHit, sentenceAt, sentenceRange, wordAt, wordBefore, type TextH
 import { WORD_RE } from '../lib/words';
 import { chapterAt, getPosition, loadBook, savePosition, type LoadedBook } from '../store/books';
 import { finishToday, getToday } from '../store/today';
+import { loadMyPhrases } from '../store/phrases';
 import { fillMissingExplanations, learningKeys, loadWords, onWordsChange } from '../store/words';
 import { Icon, Sheet, TypeControls, go } from '../components/ui';
 import { WordPopover, type WordTarget } from '../components/WordPopover';
@@ -174,7 +175,7 @@ function ReaderView({ book, mode, start, end, at }: Session) {
       setLearningPhrases([...keys].filter((k) => k.includes(' ')).map(patternFor));
     };
     Promise.all([loadWords(), loadLemmas()]).then(refresh);
-    loadPhrases().then(refresh);
+    loadPhrases().then(loadMyPhrases).then(refresh);
     fillMissingExplanations().catch(() => {});
     const off = onWordsChange(refresh);
     addEventListener('online', fillMissingExplanationsQuietly);
