@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a PDF or EPUB book into clean Daily Reader JSON.
+"""Convert a PDF, EPUB or TXT book into clean Daily Reader JSON.
 
 Output format:
     {"title": ..., "author": ..., "chapters": [{"title": ..., "paragraphs": [...]}]}
@@ -26,12 +26,16 @@ OUT_DIR = ROOT / "books"
 
 # Front/back matter that is not worth reading as a daily excerpt.
 SKIP_TITLES = re.compile(
-    r"^\s*(cover|half ?title|title( page)?|copyright|dedication|(table of )?contents|epigraph"
+    r"^\s*(cover|half ?title|title( page)?|copyright( page)?|dedication|(table of )?contents( page)?|epigraph|cover page"
     r"|acknowledge?ments?|(list of )?illustrations|index|notes|endnotes|footnotes|bibliography"
     r"|glossary|.*['’]s glossary|resources|credits|photo credits|about the (author|authors|publisher)"
-    r"|also by .*|praise( for .*)?|keep reading|further confessions.*|what should you read next\??)\s*$",
+    r"|also by .*|praise( for .*)?|keep reading|further confessions.*|what should you read next\??|about the book)\s*$",
     re.I,
 )
+# Promotion left in some files: a short paragraph built around a web address
+# ("www.headline.co.uk", "You can download this chapter at: …"), or a note in another language.
+AD_LINK = re.compile(r"https?://|www\.|\b[\w-]+\.(?:com|net|org|ru|co\.uk|io|info)\b(?:/\S*)?", re.I)
+FOREIGN = re.compile(r"[А-Яа-яЁё]")
 LIST_RE = re.compile(r"^\s*(\d{1,3}[.)]|[•●▪◦■□–-])\s")
 TERMINAL = tuple(".!?…:;”\"’)")
 SCENE_RE = re.compile(r"^[\s*#~•⁂·_.-]{1,12}$")
@@ -64,29 +68,18 @@ def title_case(title):
 
 def nice_chapter_title(title):
     title = clean(title)
-    if re.fullmatch(r"\d+", title):
-        return f"Chapter {title}"
+    if re.fullmatch(r"\d+", title) or re.fullmatch(NUMBER_WORD, title, re.I):
+        return f"Chapter {title.capitalize()}"
     return title_case(title)
-
-
-def fix_leading_caps(par):
-    """'REVEILLE was sounded' -> 'Reveille was sounded' (small caps at chapter start)."""
-    words = par.split(" ")
-    n = 0
-    while n < len(words) and re.fullmatch(r"[A-Z][A-Z’']+[,.;:!?]?", words[n]):
-        n += 1
-    if n == 0:
-        return par
-    for i in range(n):
-        w = words[i].lower()
-        words[i] = w.capitalize() if i == 0 else w
-    return " ".join(words)
 
 
 def finish_chapter(title, paragraphs):
     out = []
     for p in paragraphs:
         p = clean(p)
+        if FOREIGN.search(p) or (AD_LINK.search(p) and len(p.split()) <= 25):
+            continue
+        p = re.sub(r"^([“\"‘]?[A-Z]) ([A-Z]{2,})\b", r"\1\2", p)      # drop cap split off: "W HEN" → "WHEN"
         p = re.sub(r"(?<=[\w.,!?;:”’)])[*†‡]+(?=\s|$)", "", p)       # footnote marks
         if not p:
             continue
@@ -97,8 +90,6 @@ def finish_chapter(title, paragraphs):
         out.append(p)
     while out and out[-1] == "* * *":
         out.pop()
-    if out:
-        out[0] = fix_leading_caps(out[0])
     return {"title": nice_chapter_title(title), "paragraphs": out}
 
 
@@ -230,6 +221,9 @@ def join_lines(a, b, m):
     at, bt = a.text.strip(), b.text.strip()
     if LIST_RE.match(bt):
         return False
+    # A chapter heading on a line of its own ("Twenty-four") never joins a paragraph.
+    if any(CHAPTER_LINE.match(t) and t[:1].isupper() for t in (at, bt)):
+        return False
     if at.endswith(("“", "-", "—")):
         return True
     first = re.match(r"[“\"‘'(]*(\w)", bt)
@@ -279,8 +273,11 @@ def convert_pdf(path):
     doc = fitz.open(path)
     pages, m = pdf_lines(doc)
     toc = [(lvl, t, p - 1) for lvl, t, p in doc.get_toc() if p >= 1]
+    meta = doc.metadata or {}
     if not toc:
-        toc = [(1, Path(path).stem, 0)]
+        paras = pdf_paragraphs([ln for p in pages for ln in p], m)
+        chapters = split_by_headings([p[2] for p in paras], Path(path).stem)
+        return meta.get("title") or Path(path).stem, meta.get("author") or "", chapters
     chapters = []
     for i, (lvl, title, start) in enumerate(toc):
         end = toc[i + 1][2] if i + 1 < len(toc) else len(pages)
@@ -298,7 +295,6 @@ def convert_pdf(path):
             else:
                 break
         chapters.append((title, [p[2] for p in paras]))
-    meta = doc.metadata or {}
     return meta.get("title") or Path(path).stem, meta.get("author") or "", chapters
 
 
@@ -307,13 +303,11 @@ def convert_pdf(path):
 BLOCK_TAGS = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "dd", "dt"]
 
 
-def convert_epub(path):
-    from bs4 import BeautifulSoup
+def load_epub_ebooklib(path):
+    """(title, author, [(name, html bytes)] in reading order, {name: toc title})."""
     from ebooklib import epub
 
-    warnings.filterwarnings("ignore")
     book = epub.read_epub(str(path), options={"ignore_ncx": False})
-
     titles = {}
 
     def walk(items):
@@ -325,26 +319,97 @@ def convert_epub(path):
             walk(kids)
 
     walk(book.toc)
-
-    chapters = []
+    docs = []
     for idref, _ in book.spine:
         item = book.get_item_with_id(idref)
-        if item is None:
-            continue
-        soup = BeautifulSoup(item.get_content(), "lxml")
+        if item is not None:
+            docs.append((item.get_name(), item.get_content()))
+
+    def meta(name):
+        vals = book.get_metadata("DC", name)
+        return ", ".join(v[0] for v in vals) if vals else ""
+
+    return meta("title"), meta("creator"), docs, titles
+
+
+def load_epub_zip(path):
+    """The same, read straight from the zip: for EPUBs ebooklib rejects (e.g. an OPF without
+    its XML namespace)."""
+    import posixpath
+    import zipfile
+    from urllib.parse import unquote
+
+    from bs4 import BeautifulSoup
+
+    z = zipfile.ZipFile(path)
+    container = BeautifulSoup(z.read("META-INF/container.xml"), "xml")
+    opf_path = container.find("rootfile")["full-path"]
+    base = posixpath.dirname(opf_path)
+    opf = BeautifulSoup(z.read(opf_path), "xml")
+
+    def local(tag_name):                        # match "item", "opf:item" alike
+        return lambda t: t.name and t.name.split(":")[-1] == tag_name
+
+    manifest = {}
+    for item in opf.find_all(local("item")):
+        manifest[item.get("id")] = (posixpath.normpath(posixpath.join(base, unquote(item.get("href", "")))),
+                                    item.get("media-type", ""), item.get("properties", ""))
+    docs = []
+    for ref in opf.find_all(local("itemref")):
+        entry = manifest.get(ref.get("idref"))
+        if entry and entry[0] in z.namelist():
+            docs.append((entry[0], z.read(entry[0])))
+
+    titles = {}
+    ncx = next((m for m in manifest.values() if m[1] == "application/x-dtbncx+xml"), None)
+    nav = next((m for m in manifest.values() if "nav" in m[2].split()), None)
+    if ncx and ncx[0] in z.namelist():
+        soup = BeautifulSoup(z.read(ncx[0]), "xml")
+        for point in soup.find_all(local("navPoint")):
+            label, content = point.find(local("text")), point.find(local("content"))
+            if label and content:
+                href = posixpath.normpath(posixpath.join(posixpath.dirname(ncx[0]), unquote(content["src"].split("#")[0])))
+                titles.setdefault(href, label.get_text(" ", strip=True))
+    elif nav and nav[0] in z.namelist():
+        soup = BeautifulSoup(z.read(nav[0]), "lxml")
+        for a in soup.select("nav a[href]"):
+            href = posixpath.normpath(posixpath.join(posixpath.dirname(nav[0]), unquote(a["href"].split("#")[0])))
+            titles.setdefault(href, a.get_text(" ", strip=True))
+
+    def meta(name):
+        return ", ".join(t.get_text(strip=True) for t in opf.find_all(local(name)))
+
+    return meta("title"), meta("creator"), docs, titles
+
+
+def convert_epub(path):
+    from bs4 import BeautifulSoup
+
+    warnings.filterwarnings("ignore")
+    try:
+        title_, author, docs, titles = load_epub_ebooklib(path)
+    except Exception:
+        title_, author, docs, titles = load_epub_zip(path)
+
+    chapters = []
+    for name, content in docs:
+        soup = BeautifulSoup(content, "lxml")
         for tag in soup(["script", "style", "sup", "figcaption"]):
             tag.decompose()
         for tag in soup.find_all(class_=re.compile(r"caption", re.I)):
             tag.decompose()                           # photo captions
+        for br in soup.find_all("br"):
+            br.replace_with(" ")
         paras = []
         for el in soup.find_all(BLOCK_TAGS):
             if el.find(BLOCK_TAGS):                   # container; its children are visited instead
                 continue
-            text = clean(el.get_text(" "))
+            # Inline text as a browser shows it: a drop cap in its own <span> stays part of the word.
+            text = clean(el.get_text(""))
             text = re.sub(r" ([,.;:!?’”)])", r"\1", text)
             if text:
                 paras.append(text)
-        title = titles.get(item.get_name())
+        title = titles.get(name)
         if title is None:
             if chapters:                              # untitled spine part: continuation
                 chapters[-1][1].extend(paras)
@@ -354,14 +419,98 @@ def convert_epub(path):
             paras.pop(0)
         chapters.append((title, paras))
 
-    def meta(name):
-        vals = book.get_metadata("DC", name)
-        return ", ".join(v[0] for v in vals) if vals else ""
+    return title_ or Path(path).stem, author, chapters
 
-    return meta("title") or Path(path).stem, meta("creator"), chapters
+
+# ---------------------------------------------------------------- TXT
+
+NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+               r"sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty)(?:-(?:one|two|three|four|five|six|seven|eight|nine))?")
+# A line that starts a chapter in a book without a table of contents: "Chapter 3", "Part Two", "Three", "12".
+CHAPTER_LINE = re.compile(
+    rf"^(?:(?:chapter|part|book)\s+(?:[0-9]+|[ivxlcdm]+|{NUMBER_WORD})\b.{{0,60}}|{NUMBER_WORD}|[0-9]{{1,3}}"
+    r"|prologue|epilogue|introduction|afterword|foreword|preface|acknowledge?ments?)$",
+    re.I,
+)
+
+
+def split_by_headings(paras, fallback_title):
+    """Cut a flat list of paragraphs into chapters at heading lines. A short title on the next
+    line joins its heading ("Chapter 1: Fellow Travellers"). Text before the first heading is
+    title pages, blurbs and contents, and is left out."""
+    chapters = []
+    title, current = None, []
+    i = 0
+    while i < len(paras):
+        b = clean(paras[i])
+        if CHAPTER_LINE.match(b):
+            chapters.append((title, current))
+            title, current = b, []
+            nxt = clean(paras[i + 1]) if i + 1 < len(paras) else ""
+            if nxt and len(nxt) < 60 and not nxt.endswith(TERMINAL) and not CHAPTER_LINE.match(nxt):
+                title, i = f"{b}: {nxt}", i + 1
+        else:
+            current.append(b)
+        i += 1
+    chapters.append((title, current))
+    if len(chapters) > 2:
+        return chapters[1:]
+    return [(fallback_title, [p for _, ps in chapters for p in ps])]
+
+
+def convert_txt(path):
+    """Plain text: one paragraph per line, or paragraphs hard-wrapped and separated by blank lines.
+    Chapters start at lines like "Chapter 3" (a short title on the next line joins it)."""
+    raw = Path(path).read_bytes()
+    text = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    long_lines = sum(1 for l in lines if len(l) > 200)
+    if long_lines > len(lines) * 0.05:
+        blocks = [l.strip() for l in lines]                     # a paragraph per line
+    else:
+        blocks = [" ".join(b.split()) for b in re.split(r"\n\s*\n", text)]   # hard-wrapped
+    blocks = [b for b in blocks if b and not re.search(r"[А-Яа-яЁё]", b)]  # drop other-language notes
+
+    name = Path(path).stem.replace("_", " ")
+    return name, "", split_by_headings(blocks, name)
 
 
 # ---------------------------------------------------------------- main
+
+def fix_openings(raw):
+    """Chapter openings set in drop cap + small caps, judged by the book's own vocabulary:
+    "IHAD BARELY HAD time" → "I had barely had time" ("ihad" appears nowhere else, "had" does),
+    "I DIDN'T SEE RAYMOND on Monday" → "I didn't see Raymond on Monday" (Raymond is mostly
+    written with a capital in this book), "REVEILLE was sounded" → "Reveille was sounded"."""
+    words = [w for _, paras in raw for p in paras for w in re.findall(r"[A-Za-z’']+", p)]
+    lower = Counter(w.lower() for w in words)
+    exact = Counter(words)
+
+    def is_caps(w):
+        return re.fullmatch(r"[“\"‘(]?[A-Z][A-Z’'-]+[,.;:!?”\")]*", w) is not None
+
+    def fix(p):
+        m = re.match(r"^([“\"‘]?)([IA])([A-Za-z]+)\b", p)
+        if m and lower[(m.group(2) + m.group(3)).lower()] <= 1 and lower[m.group(3).lower()] >= 3:
+            p = f"{m.group(1)}{m.group(2)} {m.group(3)}{p[m.end():]}"
+        ws = p.split(" ")
+        first = next((i for i in range(min(12, len(ws)))
+                      if is_caps(ws[i]) and (i == 0 or (i + 1 < len(ws) and is_caps(ws[i + 1])))), None)
+        if first is None:
+            return p
+        i = first
+        while i < len(ws) and (is_caps(ws[i]) or ws[i] in ("I", "A")):
+            bare = re.sub(r"[^A-Za-z’']", "", ws[i])
+            titled = bare[:1] + bare[1:].lower()
+            capital = (i == 0 or re.search(r"[.!?]”?$", ws[i - 1])
+                       or bare == "I" or exact[titled] > exact[bare.lower()])
+            low = ws[i].lower()
+            ws[i] = re.sub(r"[a-z]", lambda c: c.group().upper(), low, count=1) if capital else low
+            i += 1
+        return " ".join(ws)
+
+    return [(title, [fix(paras[0])] + paras[1:] if paras else paras) for title, paras in raw]
+
 
 def convert(path, title=None, author=None, skip=()):
     path = Path(path).expanduser()
@@ -370,8 +519,11 @@ def convert(path, title=None, author=None, skip=()):
         t, a, raw = convert_pdf(path)
     elif ext == ".epub":
         t, a, raw = convert_epub(path)
+    elif ext == ".txt":
+        t, a, raw = convert_txt(path)
     else:
         raise SystemExit(f"Unsupported file type: {path}")
+    raw = fix_openings(raw)
     skip_res = [re.compile(s, re.I) for s in skip]
     chapters, skipped = [], []
     for ctitle, paras in raw:
@@ -405,7 +557,7 @@ def slug(text):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", nargs="?", help="PDF or EPUB file")
+    ap.add_argument("input", nargs="?", help="PDF, EPUB or TXT file")
     ap.add_argument("-o", "--output", help="output JSON (default: books/<title>.json)")
     ap.add_argument("--title")
     ap.add_argument("--author")

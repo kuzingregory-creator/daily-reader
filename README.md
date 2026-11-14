@@ -7,7 +7,7 @@
 ```bash
 ../venv/bin/python tools/convert.py --all     # все книги из tools/library.json → books/*.json
 ../venv/bin/python tools/preview.py           # books/preview.html — проверить текст глазами
-../venv/bin/python tools/convert.py Book.pdf  # одна книга
+../venv/bin/python tools/convert.py Book.pdf  # одна книга (PDF, EPUB или TXT)
 ```
 
 `books/` не попадает в git: книги личные.
